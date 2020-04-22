@@ -1,0 +1,19 @@
+[package]
+name = "http-proxy"
+version = "2.0.0"
+authors = ["hyper team<@hyperium>", "vinhjaxt<@vinhjaxt>"]
+edition = "2018"
+
+[dependencies]
+hyper = { version = "0.13" }
+hyper-tls = { version = "0.4" }
+tokio = { version = "0.2", features = ["full"] }
+tokio-io-timeout = "0.4"
+futures-core = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false }
+http = "0.2"
+twoway = "0.2"
+clap = "2.32"
+lazy_static = "1.4"
+ajson = "0.2"
+async-std =  { version = "1.5", features = ["std"], default-features = false }
