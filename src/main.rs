@@ -26,6 +26,8 @@ extern crate lazy_static;
 type HttpClient = Client<hyper::client::HttpConnector>;
 type HttpsClient = Client<HttpsConnector<hyper::client::HttpConnector>>;
 static mut DOH_ENDPOINT: &'static str = "https://1.1.1.1/dns-query";
+static mut INSERT_SPACE_HTTP_HOST: bool = false;
+static SPACE_HTTP_HOST: &'static [u8] = &[32];
 
 #[derive(Clone)]
 struct CacheResolver {
@@ -65,41 +67,44 @@ async fn main() {
         .arg(
             Arg::with_name("port")
                 .short("p")
+                .help("Listen port")
                 .takes_value(true)
-                .help("Listen port: Eg. 8080")
-                .required(true),
+                .default_value("8080"),
         )
         .arg(
             Arg::with_name("doh")
                 .short("d")
-                .help(
-                    format!("Change DNS over HTTPS endpoint: Eg. {}", unsafe {
-                        DOH_ENDPOINT
-                    })
-                    .as_str(),
-                )
+                .help("DNS over HTTPS endpoint")
                 .takes_value(true)
-                .required(false),
+                .default_value(unsafe { DOH_ENDPOINT }),
+        )
+        .arg(
+            Arg::with_name("host-space")
+                .short("s")
+                .help("Add space before http host header")
+                .takes_value(false),
         )
         .get_matches();
-    let listen_port = value_t!(matches, "port", u16).unwrap_or_else(|e| e.exit());
-    let addr = SocketAddr::from(([127, 0, 0, 1], listen_port));
-    if let Some(doh) = matches.value_of("doh") {
-        unsafe {
-            DOH_ENDPOINT = doh;
+    unsafe {
+        DOH_ENDPOINT = matches.value_of("doh").unwrap();
+        println!("Use dns-over-https: {}", DOH_ENDPOINT);
+        if matches.is_present("host-space") {
+            INSERT_SPACE_HTTP_HOST = true;
+            println!("Add space before http host header: true");
         }
     }
-    println!("Use dns-over-https: {}", unsafe { DOH_ENDPOINT });
 
     let http_client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(360))
         .pool_max_idle_per_host(10)
+        .http1_title_case_headers(true)
         .build_http();
 
     let https = HttpsConnector::new();
     let https_client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(360))
         .pool_max_idle_per_host(10)
+        .http1_title_case_headers(true)
         .build::<_, hyper::Body>(https);
 
     let make_service = make_service_fn(move |_| {
@@ -111,9 +116,13 @@ async fn main() {
             }))
         }
     });
-    let server = Server::bind(&addr).serve(make_service);
+    let server = Server::bind(&SocketAddr::from((
+        [127, 0, 0, 1],
+        value_t!(matches, "port", u16).unwrap(),
+    )))
+    .serve(make_service);
 
-    println!("Listening on http://{}", addr);
+    println!("Listening on http://{}", server.local_addr());
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
@@ -121,7 +130,7 @@ async fn main() {
 
 async fn proxy(
     client: HttpClient,
-    req: Request<Body>,
+    mut req: Request<Body>,
     https_client: HttpsClient,
 ) -> Result<Response<Body>, hyper::Error> {
     // println!("{:?} {:?}", req.method(), req.uri());
@@ -154,6 +163,21 @@ async fn proxy(
 
         Ok(Response::new(Body::empty()))
     } else {
+        let req_headers = req.headers_mut();
+        if unsafe { INSERT_SPACE_HTTP_HOST } {
+            // Change host
+            let host = req_headers.get(hyper::header::HOST).unwrap().as_bytes();
+            let host_new = [SPACE_HTTP_HOST, host].concat();
+            req_headers.insert(
+                hyper::header::HOST,
+                hyper::header::HeaderValue::from_bytes(host_new.as_slice()).unwrap(),
+            );
+            req_headers.insert(
+                hyper::header::CONNECTION,
+                hyper::header::HeaderValue::from_static("close"),
+            );
+        }
+        req_headers.remove("proxy-connection");
         client.request(req).await
     }
 }
@@ -214,17 +238,18 @@ async fn get_server_connection<'a>(
     }
 
     // if system dns not resolved, do doh
-    let resp = https_client
-        .get(
-            format!(
-                "{}?ct=application/dns-json&type=A&name={}",
-                unsafe { DOH_ENDPOINT },
-                host_string
-            )
-            .parse::<http::Uri>()
-            .unwrap(),
-        )
-        .await;
+    let req = Request::get(format!(
+        "{}?ct=application/dns-json&type=A&name={}",
+        unsafe { DOH_ENDPOINT },
+        host_string
+    ))
+    .header(
+        "Accept",
+        "application/dns-json, application/json, text/plain, */*",
+    )
+    .body(Body::empty())
+    .unwrap();
+    let resp = https_client.request(req).await;
     if resp.is_err() {
         println!("dns-over-https: {}", resp.err()?);
         return None;
