@@ -142,6 +142,8 @@ x86_64-uwp-windows-msvc
 x86_64-wrs-vxworks
 COMMENT
 
+rm dpi-http-proxy-* -rf
+
 TARGET="x86_64-unknown-linux-gnu"
 EXE_PATH="target/$TARGET/release/http-proxy"
 echo "Building for $TARGET.."
