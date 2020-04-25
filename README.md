@@ -1,2 +1,2 @@
 # Rust verion
-Original from: [GreenTunnel](https://github.com/SadeghHayeri/GreenTunnel)
+Idea from: [GreenTunnel](https://github.com/SadeghHayeri/GreenTunnel)
