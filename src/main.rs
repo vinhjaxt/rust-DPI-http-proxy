@@ -134,7 +134,7 @@ async fn main() {
 
     let https = HttpsConnector::new();
     let https_client = Client::builder()
-        .pool_idle_timeout(Duration::from_secs(60360))
+        .pool_idle_timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(10000)
         .http1_title_case_headers(true)
         .build::<_, hyper::Body>(https);
