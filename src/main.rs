@@ -7,9 +7,10 @@ use hyper::upgrade::Upgraded;
 use hyper::{Body, Client, Method, Request, Response, Server};
 use hyper_tls::HttpsConnector;
 use std::convert::Infallible;
-
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration};
+use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -22,10 +23,14 @@ use twoway::find_bytes;
 extern crate ajson;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate clap;
 
 type HttpClient = Client<hyper::client::HttpConnector>;
 type HttpsClient = Client<HttpsConnector<hyper::client::HttpConnector>>;
 static mut DOH_ENDPOINT: &'static str = "https://1.1.1.1/dns-query";
+static mut CONNECT_TIMEOUT: u64 = 5;
+static mut READ_TIMEOUT: u64 = 0;
 static mut INSERT_SPACE_HTTP_HOST: bool = false;
 static SPACE_HTTP_HOST: &'static [u8] = &[32];
 
@@ -63,10 +68,14 @@ lazy_static! {
 //    $ curl -x http://127.0.0.1:8080 https://echo.opera.com/
 #[tokio::main]
 async fn main() {
-    let matches = clap::App::new("Rust DPI bypass - HTTP Proxy v2.0.0")
+    let matches = clap::App::new("Rust https DPI")
+        .version(crate_version!())
+        .author("vinhjaxt <ngoc.lo.dang@gmail.com>")
+        .about("HTTP proxy bypasses ISP DPI censorship powered by hyper")
         .arg(
             Arg::with_name("port")
                 .short("p")
+                .long("port")
                 .help("Listen port")
                 .takes_value(true)
                 .default_value("8080"),
@@ -74,14 +83,29 @@ async fn main() {
         .arg(
             Arg::with_name("doh")
                 .short("d")
+                .long("doh")
                 .help("DNS over HTTPS endpoint")
                 .takes_value(true)
                 .default_value(unsafe { DOH_ENDPOINT }),
         )
         .arg(
+            Arg::with_name("conn-timeout")
+                .long("conn-timeout")
+                .help("Connect timeout in seconds")
+                .takes_value(true)
+                .default_value("5"),
+        )
+        .arg(
+            Arg::with_name("read-timeout")
+                .long("read-timeout")
+                .help("Conn read timeout in seconds [default: not used = 0]")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("host-space")
                 .short("s")
-                .help("Add space before http host header")
+                .long("host-space")
+                .help("Add space before http host header [default: not used]")
                 .takes_value(false),
         )
         .get_matches();
@@ -92,18 +116,26 @@ async fn main() {
             INSERT_SPACE_HTTP_HOST = true;
             println!("Add space before http host header: true");
         }
+        CONNECT_TIMEOUT = value_t!(matches, "conn-timeout", u64).unwrap();
+        println!("Use connect timeout: {}s", CONNECT_TIMEOUT);
+        if matches.is_present("read-timeout") {
+            READ_TIMEOUT = value_t!(matches, "read-timeout", u64).unwrap();
+            if READ_TIMEOUT != 0 {
+                println!("Use read timeout: {}s", READ_TIMEOUT);
+            }
+        }
     }
 
     let http_client = Client::builder()
-        .pool_idle_timeout(Duration::from_secs(360))
-        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(10000)
         .http1_title_case_headers(true)
         .build_http();
 
     let https = HttpsConnector::new();
     let https_client = Client::builder()
-        .pool_idle_timeout(Duration::from_secs(360))
-        .pool_max_idle_per_host(10)
+        .pool_idle_timeout(Duration::from_secs(60360))
+        .pool_max_idle_per_host(10000)
         .http1_title_case_headers(true)
         .build::<_, hyper::Body>(https);
 
@@ -208,6 +240,7 @@ async fn get_server_connection<'a>(
     uri: &'a http::Uri,
     https_client: HttpsClient,
 ) -> Option<(TcpStream, &'a [u8])> {
+    let conn_timeout = Some(Duration::from_secs(unsafe { CONNECT_TIMEOUT }));
     let auth = uri.authority()?;
     let host = auth.host();
     let host_bytes = host.as_bytes();
@@ -218,7 +251,7 @@ async fn get_server_connection<'a>(
     };
     // cache
     if let Some(ip) = IP_CACHE.get(&host_string).await {
-        let s = TcpStream::connect(SocketAddr::new(ip, port)).await;
+        let s = do_timeout(TcpStream::connect(SocketAddr::new(ip, port)), conn_timeout).await;
         if s.is_ok() {
             return Some((s.unwrap(), host_bytes));
         }
@@ -228,7 +261,7 @@ async fn get_server_connection<'a>(
     if sock_addr.is_ok() {
         for mut addr in sock_addr.unwrap() {
             addr.set_port(port);
-            let s = TcpStream::connect(addr).await;
+            let s = do_timeout(TcpStream::connect(addr), conn_timeout).await;
             if s.is_ok() {
                 // save to cache
                 IP_CACHE.set(host_string, addr.ip()).await;
@@ -251,7 +284,7 @@ async fn get_server_connection<'a>(
     .unwrap();
     let resp = https_client.request(req).await;
     if resp.is_err() {
-        println!("dns-over-https: {}", resp.err()?);
+        println!("dns-over-https: {} {}", resp.err()?, host);
         return None;
     }
     let body = hyper::body::to_bytes(resp.unwrap().body_mut()).await;
@@ -268,7 +301,7 @@ async fn get_server_connection<'a>(
             .to_socket_addrs()
             .unwrap()
             .next()?;
-        let s = TcpStream::connect(addr).await;
+        let s = do_timeout(TcpStream::connect(addr), conn_timeout).await;
         if s.is_ok() {
             // save to cache
             IP_CACHE.set(host_string, addr.ip()).await;
@@ -293,19 +326,18 @@ async fn tunnel(
     let (mut server, hostname) = dns_ret.unwrap();
 
     // TODO: timeout when visit: .ooklaserver.net, .nflxvideo.net,..
-    let set_client_timeout = false;
 
     // Proxying data
     let amounts = {
         let (mut server_rd, mut server_wr) = server.split();
-        let (mut client_rd, mut client_wr) = tokio::io::split(upgraded);
+        let (client_rd, mut client_wr) = tokio::io::split(upgraded);
 
-        let server_to_client = tokio::io::copy(&mut server_rd, &mut client_wr);
-        split_hello_phrase(&mut client_rd, &mut server_wr, hostname).await?;
         let mut client_rd_timeout = TimeoutReader::new(client_rd);
-        if set_client_timeout {
-            client_rd_timeout.set_timeout(Some(Duration::from_secs(7)));
+        if unsafe { READ_TIMEOUT } != 0 {
+            client_rd_timeout.set_timeout(Some(Duration::from_secs(unsafe { READ_TIMEOUT })));
         }
+        split_hello_phrase(&mut client_rd_timeout, &mut server_wr, hostname).await?;
+        let server_to_client = tokio::io::copy(&mut server_rd, &mut client_wr);
         let client_to_server = tokio::io::copy(&mut client_rd_timeout, &mut server_wr);
         try_join(client_to_server, server_to_client).await
     };
@@ -322,4 +354,19 @@ async fn tunnel(
     // println!("CLOSED {}", std::str::from_utf8(hostname).unwrap());
     server.shutdown(std::net::Shutdown::Both)?;
     Ok(())
+}
+
+async fn do_timeout<T, F>(f: F, timeout: Option<Duration>) -> Result<T, std::io::Error>
+where
+    F: Future<Output = Result<T, std::io::Error>>,
+{
+    if let Some(to) = timeout {
+        match tokio::time::timeout(to, f).await {
+            Err(_elapsed) => Err(io::Error::new(io::ErrorKind::TimedOut, "timeout")),
+            Ok(Ok(try_res)) => Ok(try_res),
+            Ok(Err(e)) => Err(e),
+        }
+    } else {
+        f.await
+    }
 }
