@@ -9,7 +9,7 @@ use hyper_tls::HttpsConnector;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::{Duration};
+use std::time::Duration;
 use tokio::io;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,6 +18,7 @@ use tokio_io_timeout::TimeoutReader;
 
 use async_std::sync::{Arc, RwLock};
 use clap::{value_t, Arg};
+use rlimit;
 use std::collections::HashMap;
 use twoway::find_bytes;
 extern crate ajson;
@@ -128,14 +129,14 @@ async fn main() {
 
     let http_client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(10000)
+        .pool_max_idle_per_host(20)
         .http1_title_case_headers(true)
         .build_http();
 
     let https = HttpsConnector::new();
     let https_client = Client::builder()
         .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(10000)
+        .pool_max_idle_per_host(20)
         .http1_title_case_headers(true)
         .build::<_, hyper::Body>(https);
 
@@ -148,6 +149,7 @@ async fn main() {
             }))
         }
     });
+    set_max_rlimit_nofile();
     let server = Server::bind(&SocketAddr::from((
         [127, 0, 0, 1],
         value_t!(matches, "port", u16).unwrap(),
@@ -368,5 +370,14 @@ where
         }
     } else {
         f.await
+    }
+}
+
+fn set_max_rlimit_nofile() {
+    if rlimit::Resource::NOFILE
+        .set(rlimit::RLIM_INFINITY, rlimit::RLIM_INFINITY)
+        .is_ok()
+    {
+        println!("Set rlimit ok");
     }
 }

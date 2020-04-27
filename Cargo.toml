@@ -17,3 +17,4 @@ clap = "2.32"
 lazy_static = "1.4"
 ajson = "0.2"
 async-std =  { version = "1.5", features = ["std"], default-features = false }
+rlimit = "0.3"
