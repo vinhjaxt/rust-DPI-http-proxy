@@ -18,7 +18,6 @@ use tokio_io_timeout::TimeoutReader;
 
 use async_std::sync::{Arc, RwLock};
 use clap::{value_t, Arg};
-use rlimit;
 use std::collections::HashMap;
 use twoway::find_bytes;
 extern crate ajson;
@@ -26,6 +25,9 @@ extern crate ajson;
 extern crate lazy_static;
 #[macro_use]
 extern crate clap;
+
+#[cfg(not(windows))]
+use rlimit;
 
 type HttpClient = Client<hyper::client::HttpConnector>;
 type HttpsClient = Client<HttpsConnector<hyper::client::HttpConnector>>;
@@ -149,7 +151,10 @@ async fn main() {
             }))
         }
     });
+
+    #[cfg(not(windows))]
     set_max_rlimit_nofile();
+
     let server = Server::bind(&SocketAddr::from((
         [127, 0, 0, 1],
         value_t!(matches, "port", u16).unwrap(),
@@ -373,6 +378,7 @@ where
     }
 }
 
+#[cfg(not(windows))]
 fn set_max_rlimit_nofile() {
     if rlimit::Resource::NOFILE
         .set(rlimit::RLIM_INFINITY, rlimit::RLIM_INFINITY)
