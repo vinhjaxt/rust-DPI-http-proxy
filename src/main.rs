@@ -34,6 +34,7 @@ type HttpsClient = Client<HttpsConnector<hyper::client::HttpConnector>>;
 static mut DOH_ENDPOINT: &'static str = "https://1.1.1.1/dns-query";
 static mut CONNECT_TIMEOUT: u64 = 5;
 static mut READ_TIMEOUT: u64 = 0;
+static mut DISABLED_DOH: bool = false;
 static mut INSERT_SPACE_HTTP_HOST: bool = false;
 static SPACE_HTTP_HOST: &'static [u8] = &[32];
 
@@ -114,7 +115,12 @@ async fn main() {
         .get_matches();
     unsafe {
         DOH_ENDPOINT = matches.value_of("doh").unwrap();
-        println!("Use dns-over-https: {}", DOH_ENDPOINT);
+        DISABLED_DOH = DOH_ENDPOINT.len() == 0;
+        if DISABLED_DOH {
+            println!("Disabled dns-over-https");
+        } else {
+            println!("Use dns-over-https: {}", DOH_ENDPOINT);
+        }
         if matches.is_present("host-space") {
             INSERT_SPACE_HTTP_HOST = true;
             println!("Add space before http host header: true");
@@ -277,6 +283,9 @@ async fn get_server_connection<'a>(
         }
     }
 
+    if unsafe{ DISABLED_DOH } {
+        return None;
+    }
     // if system dns not resolved, do doh
     let req = Request::get(format!(
         "{}?ct=application/dns-json&type=A&name={}",
